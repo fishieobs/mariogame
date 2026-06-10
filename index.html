@@ -246,6 +246,8 @@ const CFG = {
   ENEMY_SHOT:   175,    // 敵人子彈速度
   INVINCIBLE:   8,      // 星星無敵秒數
   HURT_CD:      1.4,    // 受傷後無敵閃爍秒數
+  COYOTE_TIME:  0.10,   // 離開懸崖後仍可跳躍的緩衝時間
+  JUMP_BUFFER:  0.12,   // 提前按跳躍的緩衝時間
 };
 
 /* ===================== 2. LEVELS（關卡資料） =====================
@@ -538,11 +540,18 @@ class Fireball{
   }
   draw(ctx,cam){
     const sx=this.x-cam.x|0, sy=this.y|0;
+    // 光暈
+    ctx.globalAlpha=0.35;
+    ctx.fillStyle="#ff9940";
+    ctx.beginPath(); ctx.arc(sx+this.w/2, sy+this.h/2, 10, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha=1;
     ctx.save();
     ctx.translate(sx+this.w/2, sy+this.h/2);
     ctx.rotate(this.spin);
-    ctx.fillStyle="#ff7b29"; ctx.fillRect(-6,-6,12,12);
-    ctx.fillStyle="#ffe27a"; ctx.fillRect(-3,-3,6,6);
+    ctx.fillStyle="#ff5a10"; ctx.fillRect(-6,-6,12,12);
+    ctx.fillStyle="#ff9030"; ctx.fillRect(-4,-4,8,8);
+    ctx.fillStyle="#ffe27a"; ctx.fillRect(-2,-2,4,4);
+    ctx.fillStyle="rgba(255,255,255,0.7)"; ctx.fillRect(-1,-1,2,2);
     ctx.restore();
   }
 }
@@ -801,6 +810,8 @@ class Player{
     this.riding=null;
     this.dead=false; this.deadTimer=0;
     this.anim=0;
+    this.coyoteTime=0; this.jumpBuffer=0; this.wasOnGround=false;
+    this.scaleX=1; this.scaleY=1;
   }
   setSize(){
     this.w = 22;
@@ -829,7 +840,7 @@ class Player{
   die(game){
     if(this.dead) return;
     this.dead=true; this.deadTimer=1.6; this.vy=-560; this.vx=0;
-    Audio_.die();
+    Audio_.die(); game.addShake(8);
   }
   update(dt,game){
     this.anim += dt;
@@ -856,10 +867,21 @@ class Player{
     if(this.vx>maxSpd) this.vx=maxSpd;
     if(this.vx<-maxSpd) this.vx=-maxSpd;
 
+    // ---- 犯規跳 / 緩衝跳計時器 ----
+    if(this.coyoteTime>0) this.coyoteTime-=dt;
+    if(this.jumpBuffer>0) this.jumpBuffer-=dt;
+
     // ---- 跳躍 ----
     if(Input.jumpEdge){
-      if(this.onGround){ this.vy=-CFG.JUMP_VEL; this.onGround=false; Audio_.jump(); }
-      else if(this.ability==="fly" && this.flapTimer<=0){ this.vy=-CFG.FLAP_VEL; this.flapTimer=0.28; Audio_.flap(); }
+      const canJump = this.onGround || this.coyoteTime>0;
+      if(canJump){
+        this.vy=-CFG.JUMP_VEL; this.onGround=false; this.coyoteTime=0;
+        Audio_.jump(); this.scaleX=0.80; this.scaleY=1.25;
+      } else if(this.ability==="fly" && this.flapTimer<=0){
+        this.vy=-CFG.FLAP_VEL; this.flapTimer=0.28; Audio_.flap();
+      } else {
+        this.jumpBuffer=CFG.JUMP_BUFFER; // 儲存跳躍請求
+      }
       Input.jumpEdge=false;
     }
     // ---- 射火球 ----
@@ -933,6 +955,26 @@ class Player{
 
     // ===== 掉出畫面 = 死亡 =====
     if(this.y > L.pixelH + 80) this.die(game);
+
+    // ===== 落地效果 / 犯規跳更新 / 緩衝跳解鎖 =====
+    if(!this.wasOnGround && this.onGround){
+      // 剛落地：擠壓 + 落塵粒子
+      this.scaleX=1.32; this.scaleY=0.68;
+      for(let i=0;i<5;i++) game.particles.push(new Particle(
+        this.x+i*(this.w/4), this.y+this.h,
+        (Math.random()-0.5)*100, -35-Math.random()*55,
+        "#c9a86c", 0.32, 3));
+    }
+    if(this.wasOnGround && !this.onGround) this.coyoteTime=CFG.COYOTE_TIME;
+    this.wasOnGround=this.onGround;
+    // 緩衝跳解鎖（落地瞬間若有暫存跳躍，立即執行）
+    if(this.onGround && this.jumpBuffer>0){
+      this.vy=-CFG.JUMP_VEL; this.onGround=false;
+      Audio_.jump(); this.scaleX=0.80; this.scaleY=1.25; this.jumpBuffer=0;
+    }
+    // 彈性回復
+    this.scaleX += (1-this.scaleX)*Math.min(1, dt*16);
+    this.scaleY += (1-this.scaleY)*Math.min(1, dt*16);
   }
 
   bumpBlock(tx,ty,game){
@@ -940,8 +982,8 @@ class Player{
     if(c==="b"){
       if(this.power>0){ // 大才能打破
         game.level.set(tx,ty," ");
-        Audio_.brick();
-        for(let i=0;i<6;i++) game.particles.push(new Particle(tx*TILE+16,ty*TILE+16,(Math.random()-0.5)*220,-Math.random()*320-80,"#b5651d",0.8,6));
+        Audio_.brick(); game.addShake(3);
+        for(let i=0;i<8;i++) game.particles.push(new Particle(tx*TILE+16,ty*TILE+16,(Math.random()-0.5)*260,-Math.random()*380-100,"#b5651d",0.85,6));
         game.addScore(50);
       } else { Audio_.brick(); }
     } else if(c==="?"){
@@ -979,9 +1021,8 @@ class Player{
 
   draw(ctx,cam){
     const sx=this.x-cam.x|0, sy=this.y|0, w=this.w, h=this.h;
-    // 受傷閃爍
     if(this.hurtCd>0 && (((this.hurtCd*16)|0)%2===0)) return;
-    // 星星無敵時變色循環
+
     let body = "#e63b2e", trim="#2b6cff";
     if(this.invincible>0){ const hue=(this.anim*600)%360; body=`hsl(${hue},85%,55%)`; trim=`hsl(${(hue+120)%360},85%,55%)`; }
     else if(this.ability==="fire"){ body="#fff"; trim="#e63b2e"; }
@@ -990,36 +1031,52 @@ class Player{
     const walking = Math.abs(this.vx)>5 && this.onGround;
     const legPhase = walking ? Math.sin(this.anim*18) : 0;
 
+    // 以腳底中心為縮放基點（落地不飄起）
+    ctx.save();
+    ctx.translate(sx + w/2, sy + h);
+    ctx.scale(this.scaleX, this.scaleY);
+    const ox = -(w/2)|0, oy = -h|0;
+
     // 帽子 / 頭
     ctx.fillStyle = body;
-    ctx.fillRect(sx, sy, w, Math.max(8,h*0.28));
+    ctx.fillRect(ox, oy, w, Math.max(8, h*0.28));
+    // 帽緣亮邊
+    ctx.fillStyle = "rgba(255,255,255,0.22)";
+    ctx.fillRect(ox, oy, w, 2);
     // 臉
-    ctx.fillStyle="#f4c89a"; ctx.fillRect(sx+ (this.facing>0?4:2), sy+h*0.18, w-6, h*0.18);
+    ctx.fillStyle="#f4c89a"; ctx.fillRect(ox+(this.facing>0?4:2), oy+h*0.18, w-6, h*0.18);
     // 眼睛
     ctx.fillStyle="#222";
-    const ex = this.facing>0 ? sx+w-8 : sx+5;
-    ctx.fillRect(ex, sy+h*0.2, 3, 4);
+    const ex = this.facing>0 ? ox+w-8 : ox+5;
+    ctx.fillRect(ex, oy+h*0.2, 3, 4);
+    // 高光
+    ctx.fillStyle="rgba(255,255,255,0.6)";
+    ctx.fillRect(ex+1, oy+h*0.2, 1, 2);
     // 身體
     ctx.fillStyle = trim;
-    ctx.fillRect(sx+1, sy+h*0.38, w-2, h*0.4);
+    ctx.fillRect(ox+1, oy+h*0.38, w-2, h*0.4);
+    // 吊帶亮邊
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    ctx.fillRect(ox+1, oy+h*0.38, w-2, 2);
     // 吊帶 / 手
     ctx.fillStyle = body;
-    ctx.fillRect(sx+ (this.facing>0? w-7:2), sy+h*0.42, 5, h*0.3);
+    ctx.fillRect(ox+(this.facing>0? w-7:2), oy+h*0.42, 5, h*0.3);
     // 腿
     ctx.fillStyle="#3a2b1a";
     if(this.onGround){
-      ctx.fillRect(sx+2, sy+h*0.78+legPhase, 7, h*0.22);
-      ctx.fillRect(sx+w-9, sy+h*0.78-legPhase, 7, h*0.22);
+      ctx.fillRect(ox+2, oy+h*0.78+legPhase, 7, h*0.22);
+      ctx.fillRect(ox+w-9, oy+h*0.78-legPhase, 7, h*0.22);
     } else {
-      ctx.fillRect(sx+3, sy+h*0.78, 7, h*0.18);
-      ctx.fillRect(sx+w-10, sy+h*0.78, 7, h*0.18);
+      ctx.fillRect(ox+3, oy+h*0.78, 7, h*0.18);
+      ctx.fillRect(ox+w-10, oy+h*0.78, 7, h*0.18);
     }
-    // 羽毛狀態：背後小披風 / 滑翔指示
+    // 羽毛狀態：背後小披風
     if(this.ability==="fly"){
       ctx.fillStyle="#ffd23f";
-      const back = this.facing>0 ? sx-4 : sx+w;
-      ctx.fillRect(back, sy+2, 4, h*0.5);
+      const back = this.facing>0 ? ox-4 : ox+w;
+      ctx.fillRect(back, oy+2, 4, h*0.5);
     }
+    ctx.restore();
   }
 }
 
@@ -1040,6 +1097,8 @@ const Game = (() => {
   let coins=0, lives=3, score=0, timeLeft=0;
   let floatTexts=[];   // 得分浮字
   let bgScroll=0;
+  let shakeAmp=0;
+  function addShake(amp){ shakeAmp=Math.max(shakeAmp, amp); }
 
   // ----- DOM 覆蓋層 -----
   const ovl = {
@@ -1135,6 +1194,7 @@ const Game = (() => {
   function update(dt){
     if(state!=="play") return;
     bgScroll += dt;
+    shakeAmp *= 0.80; if(shakeAmp<0.15) shakeAmp=0;
     timeLeft -= dt;
     if(timeLeft<=0 && !player.dead){ timeLeft=0; player.die(Game); }
 
@@ -1169,7 +1229,7 @@ const Game = (() => {
         if(stomping){
           e.kill(Game,true);
           player.vy = -CFG.STOMP_BOUNCE * (Input.jumpHeld?1.15:1);
-          Audio_.stomp(); addScore(100,e.x,e.y);
+          Audio_.stomp(); addScore(100,e.x,e.y); addShake(2);
         } else {
           player.hurt(Game);
         }
@@ -1201,76 +1261,186 @@ const Game = (() => {
   }
 
   // ----- 繪製 -----
-  function drawTile(c,sx,sy){
+  function drawTile(c,sx,sy,tx,ty){
     switch(c){
-      case "#":
-        ctx.fillStyle="#8a5a2b"; ctx.fillRect(sx,sy,TILE,TILE);
-        ctx.fillStyle="#a86b34"; ctx.fillRect(sx,sy,TILE,6);
-        ctx.fillStyle="#6b431f"; ctx.fillRect(sx,sy+TILE-5,TILE,5);
-        ctx.fillStyle="rgba(0,0,0,.15)"; ctx.fillRect(sx,sy+13,TILE,2);
+      case "#": {
+        const grassTop = level && level.get(tx,ty-1)===" ";
+        ctx.fillStyle="#7a4e2a"; ctx.fillRect(sx,sy,TILE,TILE);
+        // 磚紋
+        ctx.fillStyle="#8c5a30"; ctx.fillRect(sx+1,sy+8,TILE-2,5);
+        ctx.fillStyle="rgba(255,255,255,0.07)"; ctx.fillRect(sx,sy,TILE,3);
+        ctx.fillStyle="rgba(0,0,0,0.18)"; ctx.fillRect(sx,sy+TILE-4,TILE,4);
+        if(grassTop){
+          ctx.fillStyle="#3daa4a"; ctx.fillRect(sx,sy,TILE,7);
+          ctx.fillStyle="#52c260"; ctx.fillRect(sx,sy,TILE,2);
+          ctx.fillStyle="#2b8536"; ctx.fillRect(sx,sy+6,TILE,2);
+          // 小草葉
+          ctx.fillStyle="#45bb55";
+          for(let i=0;i<4;i++){
+            ctx.fillRect(sx+3+i*7, sy-3, 2, 4);
+          }
+        }
         break;
-      case "b":
+      }
+      case "b": {
+        const t2=performance.now()/1200;
         ctx.fillStyle="#b5651d"; ctx.fillRect(sx,sy,TILE,TILE);
         ctx.fillStyle="#8a4a12"; ctx.fillRect(sx,sy+15,TILE,2); ctx.fillRect(sx+15,sy,2,15); ctx.fillRect(sx+8,sy+17,2,15);
+        ctx.fillStyle="rgba(255,255,255,0.08)"; ctx.fillRect(sx,sy,TILE,2);
         break;
+      }
       case "?": case "!": case "*": {
-        const t=performance.now()/200;
-        const glow = (Math.sin(t)*0.5+0.5);
-        ctx.fillStyle = c==="*" ? "#7a4bff" : "#e6a23c";
+        const t=performance.now()/180;
+        const glow = Math.sin(t)*0.5+0.5;
+        const isSpecial = c==="*";
+        ctx.fillStyle = isSpecial ? "#6a3bef" : "#d4952b";
         ctx.fillRect(sx,sy,TILE,TILE);
-        ctx.fillStyle=`rgba(255,255,255,${0.25+glow*0.4})`; ctx.fillRect(sx+3,sy+3,TILE-6,TILE-6);
-        ctx.fillStyle="#7a4a12"; ctx.fillRect(sx,sy,TILE,3); ctx.fillRect(sx,sy+TILE-3,TILE,3);
-        ctx.fillStyle="#5a3000"; ctx.font="bold 18px monospace"; ctx.textAlign="center";
-        ctx.fillText(c==="*"?"★":"?", sx+TILE/2, sy+TILE/2+7);
+        // 亮面
+        ctx.fillStyle="rgba(255,255,255,0.18)"; ctx.fillRect(sx,sy,TILE,4);
+        ctx.fillStyle="rgba(255,255,255,0.10)"; ctx.fillRect(sx,sy,3,TILE);
+        // 發光內框
+        ctx.fillStyle=`rgba(255,255,255,${0.18+glow*0.35})`; ctx.fillRect(sx+4,sy+4,TILE-8,TILE-8);
+        // 邊框
+        ctx.fillStyle=isSpecial?"#3a1a9a":"#7a4a12";
+        ctx.fillRect(sx,sy,TILE,3); ctx.fillRect(sx,sy+TILE-3,TILE,3);
+        ctx.fillRect(sx,sy,3,TILE); ctx.fillRect(sx+TILE-3,sy,3,TILE);
+        ctx.fillStyle=isSpecial?"#ccc":"#fff8e0"; ctx.font="bold 17px monospace"; ctx.textAlign="center";
+        ctx.fillText(c==="*"?"★":"?", sx+TILE/2, sy+TILE/2+6);
         break;
       }
       case "u":
-        ctx.fillStyle="#7a5a32"; ctx.fillRect(sx,sy,TILE,TILE);
-        ctx.fillStyle="#5e4424"; ctx.fillRect(sx+2,sy+2,TILE-4,TILE-4);
+        ctx.fillStyle="#6a4e28"; ctx.fillRect(sx,sy,TILE,TILE);
+        ctx.fillStyle="#4e3618"; ctx.fillRect(sx+2,sy+2,TILE-4,TILE-4);
+        ctx.fillStyle="rgba(0,0,0,0.3)"; ctx.fillRect(sx+4,sy+4,TILE-8,TILE-8);
         break;
-      case "p":
-        ctx.fillStyle="#1f9e3f"; ctx.fillRect(sx+2,sy+4,TILE-4,TILE-4);
-        ctx.fillStyle="#16832f"; ctx.fillRect(sx,sy,TILE,7);
-        ctx.fillStyle="#7ff0a0"; ctx.fillRect(sx+5,sy+8,4,TILE-10);
+      case "p": {
+        // 水管本體
+        ctx.fillStyle="#1a8c38"; ctx.fillRect(sx+3,sy+6,TILE-6,TILE-6);
+        ctx.fillStyle="#12692a"; ctx.fillRect(sx+3,sy+6,TILE-6,3);
+        ctx.fillStyle="#25b04e"; ctx.fillRect(sx+5,sy+10,4,TILE-14);
+        // 管口帽
+        ctx.fillStyle="#16832f"; ctx.fillRect(sx,sy,TILE,8);
+        ctx.fillStyle="#1faa3f"; ctx.fillRect(sx,sy,TILE,3);
+        ctx.fillStyle="#0f5e20"; ctx.fillRect(sx,sy+6,TILE,2);
         break;
+      }
       case "=":
         ctx.fillStyle="#c98a3c"; ctx.fillRect(sx,sy,TILE,10);
-        ctx.fillStyle="#e7b56a"; ctx.fillRect(sx,sy,TILE,3);
-        ctx.fillStyle="#8a5a1f"; ctx.fillRect(sx,sy+8,TILE,2);
+        ctx.fillStyle="#e2b46a"; ctx.fillRect(sx,sy,TILE,3);
+        ctx.fillStyle="#a0692e"; ctx.fillRect(sx,sy+4,TILE,2);
+        ctx.fillStyle="#7a4e1e"; ctx.fillRect(sx,sy+8,TILE,2);
         break;
       case "^":
-        ctx.fillStyle="#cfd6e0";
-        for(let i=0;i<4;i++){ ctx.beginPath(); ctx.moveTo(sx+i*8,sy+TILE); ctx.lineTo(sx+i*8+4,sy+TILE-14); ctx.lineTo(sx+i*8+8,sy+TILE); ctx.closePath(); ctx.fill(); }
-        ctx.fillStyle="#8a93a3"; ctx.fillRect(sx,sy+TILE-3,TILE,3);
+        ctx.fillStyle="#b8c4d4";
+        for(let i=0;i<4;i++){
+          ctx.beginPath();
+          ctx.moveTo(sx+i*8, sy+TILE);
+          ctx.lineTo(sx+i*8+4, sy+TILE-15);
+          ctx.lineTo(sx+i*8+8, sy+TILE);
+          ctx.closePath(); ctx.fill();
+          // 高光
+          ctx.fillStyle="#dce5f0";
+          ctx.beginPath();
+          ctx.moveTo(sx+i*8+2, sy+TILE-2);
+          ctx.lineTo(sx+i*8+4, sy+TILE-13);
+          ctx.lineTo(sx+i*8+5, sy+TILE-8);
+          ctx.closePath(); ctx.fill();
+          ctx.fillStyle="#b8c4d4";
+        }
+        ctx.fillStyle="#7a8899"; ctx.fillRect(sx,sy+TILE-3,TILE,3);
         break;
       case "o": {
-        const t=performance.now()/150;
-        const ww = 6 + Math.abs(Math.sin(t))*6;
-        ctx.fillStyle="#ffcc33"; ctx.fillRect(sx+TILE/2-ww/2, sy+8, ww, 16);
-        ctx.fillStyle="#fff0a0"; ctx.fillRect(sx+TILE/2-2, sy+10, 2, 12);
+        const t=performance.now()/140;
+        const squeeze = Math.sin(t);
+        const cw = 6+Math.abs(squeeze)*5, ch = 16-Math.abs(squeeze)*3;
+        const cx2=sx+TILE/2-cw/2, cy2=sy+8+(16-ch)/2;
+        // 光暈
+        ctx.fillStyle="rgba(255,204,51,0.22)"; ctx.beginPath(); ctx.arc(sx+TILE/2,sy+16,10,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle="#ffcc33"; ctx.fillRect(cx2,cy2,cw,ch);
+        ctx.fillStyle="#ffe880"; ctx.fillRect(cx2,cy2,cw,3);
+        ctx.fillStyle="#ffaa00"; ctx.fillRect(cx2,cy2+ch-2,cw,2);
+        ctx.fillStyle="rgba(255,255,255,0.5)"; ctx.fillRect(cx2+1,cy2+1,2,ch-2);
         break;
       }
     }
   }
 
   function drawBackground(){
-    // 天空漸層 + 遠景山丘 + 雲
+    // 天空漸層
     const g = ctx.createLinearGradient(0,0,0,GAME_H);
     g.addColorStop(0, level.sky);
+    g.addColorStop(0.55, level.sky);
     g.addColorStop(1, "#bfe0ff");
     ctx.fillStyle=g; ctx.fillRect(0,0,GAME_W,GAME_H);
-    // 雲（視差）
-    ctx.fillStyle="rgba(255,255,255,.85)";
-    for(let i=0;i<6;i++){
-      let cx = ((i*260 - cam.x*0.3) % (GAME_W+260)); if(cx<-260) cx+=GAME_W+260;
-      let cy = 50 + (i%3)*44;
-      ctx.beginPath(); ctx.arc(cx,cy,18,0,7); ctx.arc(cx+22,cy+6,22,0,7); ctx.arc(cx+48,cy,16,0,7); ctx.fill();
+
+    // 星星（僅深色關卡）
+    const isDark = level.sky.startsWith("#8") || level.sky.startsWith("#b") || level.sky.startsWith("#9");
+    if(isDark){
+      ctx.fillStyle="rgba(255,255,255,0.9)";
+      for(let i=0;i<30;i++){
+        const sx2 = (i*97+13)%(GAME_W);
+        const sy2 = (i*53+7)%180;
+        const twinkle = 0.4+Math.abs(Math.sin(performance.now()/900+i))*0.6;
+        ctx.globalAlpha=twinkle;
+        const ss=i%3===0?2:1;
+        ctx.fillRect(sx2, sy2, ss, ss);
+      }
+      ctx.globalAlpha=1;
     }
-    // 遠山（視差）
-    ctx.fillStyle="rgba(70,130,90,.55)";
+
+    // 遠景山（第一層，超細緻）
+    const hillColor1 = isDark ? "rgba(40,20,80,0.5)" : "rgba(55,110,75,0.38)";
+    ctx.fillStyle=hillColor1;
     for(let i=0;i<8;i++){
-      let hx = ((i*200 - cam.x*0.5) % (GAME_W+200)); if(hx<-200) hx+=GAME_W+200;
-      ctx.beginPath(); ctx.moveTo(hx-60,GAME_H); ctx.lineTo(hx+40,GAME_H-120); ctx.lineTo(hx+140,GAME_H); ctx.closePath(); ctx.fill();
+      let hx = ((i*195 - cam.x*0.28)%(GAME_W+300)); if(hx<-300) hx+=GAME_W+300;
+      ctx.beginPath();
+      ctx.moveTo(hx-50,GAME_H);
+      ctx.quadraticCurveTo(hx+30,GAME_H-72, hx+90,GAME_H-55);
+      ctx.quadraticCurveTo(hx+150,GAME_H-35, hx+200,GAME_H);
+      ctx.closePath(); ctx.fill();
+    }
+    // 遠景山（第二層，較深）
+    const hillColor2 = isDark ? "rgba(60,25,110,0.65)" : "rgba(40,90,55,0.60)";
+    ctx.fillStyle=hillColor2;
+    for(let i=0;i<7;i++){
+      let hx = ((i*240 - cam.x*0.48)%(GAME_W+320)); if(hx<-320) hx+=GAME_W+320;
+      const hh = 80 + (i%4)*22;
+      ctx.beginPath();
+      ctx.moveTo(hx-40,GAME_H);
+      ctx.quadraticCurveTo(hx+55,GAME_H-hh, hx+120,GAME_H-hh*0.45);
+      ctx.quadraticCurveTo(hx+185,GAME_H-18, hx+240,GAME_H);
+      ctx.closePath(); ctx.fill();
+    }
+
+    // 雲（遠層，較小較淡）
+    for(let i=0;i<5;i++){
+      let cx = ((i*340 - cam.x*0.18)%(GAME_W+380)); if(cx<-380) cx+=GAME_W+380;
+      const cy = 28+(i%3)*22, r=14;
+      ctx.fillStyle="rgba(255,255,255,0.40)";
+      ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
+      ctx.arc(cx+r*1.3,cy+r*0.2,r*1.1,0,Math.PI*2);
+      ctx.arc(cx+r*2.7,cy,r*0.85,0,Math.PI*2);
+      ctx.fill();
+    }
+    // 雲（近層，較大較白，帶陰影）
+    for(let i=0;i<6;i++){
+      let cx = ((i*220 - cam.x*0.32)%(GAME_W+280)); if(cx<-280) cx+=GAME_W+280;
+      const cy = 52+(i%3)*28, r=18;
+      // 雲底影
+      ctx.fillStyle="rgba(160,175,210,0.25)";
+      ctx.beginPath(); ctx.arc(cx+r,cy+r*0.6,r*1.1,0,Math.PI*2); ctx.fill();
+      // 雲白體
+      ctx.fillStyle="rgba(255,255,255,0.82)";
+      ctx.beginPath();
+      ctx.arc(cx,cy,r,0,Math.PI*2);
+      ctx.arc(cx+r*1.4,cy-r*0.15,r*1.3,0,Math.PI*2);
+      ctx.arc(cx+r*2.9,cy,r,0,Math.PI*2);
+      ctx.fill();
+      // 雲頂亮邊
+      ctx.fillStyle="rgba(255,255,255,0.95)";
+      ctx.beginPath();
+      ctx.arc(cx+r*1.4,cy-r*0.3,r*0.7,Math.PI,Math.PI*2);
+      ctx.fill();
     }
   }
 
@@ -1278,61 +1448,137 @@ const Game = (() => {
     if(!level.goal) return;
     const gx = level.goal.tx*TILE - cam.x;
     const baseY = (level.goal.ty+1)*TILE;
-    // 旗桿
-    ctx.fillStyle="#cfd6e0"; ctx.fillRect(gx+TILE/2-2, 64, 4, baseY-64);
-    ctx.fillStyle="#7a93a3"; ctx.fillRect(gx+TILE/2-4, 60, 8, 8); // 頂端球
-    // 旗子（飄動）
-    const fl = Math.sin(performance.now()/200)*4;
+    // 旗桿（漸層）
+    const poleGrad=ctx.createLinearGradient(gx+TILE/2-3,0,gx+TILE/2+3,0);
+    poleGrad.addColorStop(0,"#aab8c8"); poleGrad.addColorStop(0.4,"#dde8f0"); poleGrad.addColorStop(1,"#8898aa");
+    ctx.fillStyle=poleGrad; ctx.fillRect(gx+TILE/2-3, 58, 6, baseY-58);
+    // 頂端球
+    ctx.fillStyle="#eef2f8"; ctx.beginPath(); ctx.arc(gx+TILE/2,60,7,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle="#ccd8e8"; ctx.beginPath(); ctx.arc(gx+TILE/2+2,58,3,0,Math.PI*2); ctx.fill();
+    // 旗子（飄動，帶陰影）
+    const fl = Math.sin(performance.now()/220)*5;
+    ctx.fillStyle="rgba(0,0,0,0.2)"; ctx.beginPath();
+    ctx.moveTo(gx+TILE/2+3, 76); ctx.lineTo(gx+TILE/2+3+34+fl, 86); ctx.lineTo(gx+TILE/2+3, 96); ctx.closePath(); ctx.fill();
     ctx.fillStyle="#ff5a3c"; ctx.beginPath();
-    ctx.moveTo(gx+TILE/2+2, 74);
-    ctx.lineTo(gx+TILE/2+2+34+fl, 84);
-    ctx.lineTo(gx+TILE/2+2, 94); ctx.closePath(); ctx.fill();
+    ctx.moveTo(gx+TILE/2+2, 74); ctx.lineTo(gx+TILE/2+2+34+fl, 84); ctx.lineTo(gx+TILE/2+2, 94); ctx.closePath(); ctx.fill();
+    ctx.fillStyle="#ff9070"; ctx.beginPath();
+    ctx.moveTo(gx+TILE/2+2, 74); ctx.lineTo(gx+TILE/2+2+34+fl, 84); ctx.lineTo(gx+TILE/2+2+20+fl, 79); ctx.closePath(); ctx.fill();
     // 底座
-    ctx.fillStyle="#3a2b1a"; ctx.fillRect(gx+TILE/2-8, baseY-10, 16, 10);
+    ctx.fillStyle="#2a1a0e"; ctx.fillRect(gx+TILE/2-10, baseY-12, 20, 12);
+    ctx.fillStyle="#4a3020"; ctx.fillRect(gx+TILE/2-10, baseY-12, 20, 3);
   }
   function drawCastle(){
     if(!level.castle) return;
     const cx = level.castle.tx*TILE - cam.x;
     const baseY = (level.castle.ty+1)*TILE;
-    const cw=86, ch=96;
-    ctx.fillStyle="#7a5a8a"; ctx.fillRect(cx-10, baseY-ch, cw, ch);
-    ctx.fillStyle="#5a3f6e";
-    for(let i=0;i<5;i++) ctx.fillRect(cx-10+i*18, baseY-ch-10, 12, 12); // 城垛
-    ctx.fillStyle="#2a1830"; ctx.fillRect(cx+24, baseY-34, 24, 34); // 城門
-    ctx.fillStyle="#b58fd0"; ctx.fillRect(cx+4, baseY-70, 14, 14); ctx.fillRect(cx+54, baseY-70, 14, 14);
+    const cw=90, ch=100;
+    // 城牆本體
+    ctx.fillStyle="#6e5080"; ctx.fillRect(cx-12, baseY-ch, cw, ch);
+    // 城牆陰影側面
+    ctx.fillStyle="#4a3060"; ctx.fillRect(cx-12, baseY-ch, 5, ch);
+    ctx.fillStyle="#8a6aa0"; ctx.fillRect(cx-12, baseY-ch, cw, 4); // 頂面高光
+    // 城垛
+    for(let i=0;i<5;i++){
+      ctx.fillStyle="#5a3f70"; ctx.fillRect(cx-12+i*19, baseY-ch-12, 13, 13);
+      ctx.fillStyle="#7a5a90"; ctx.fillRect(cx-12+i*19, baseY-ch-12, 13, 3);
+    }
+    // 城門
+    ctx.fillStyle="#1e1028"; ctx.fillRect(cx+22, baseY-36, 26, 36);
+    ctx.fillStyle="#2e1840"; ctx.fillRect(cx+24, baseY-36, 5, 36);
+    // 窗戶
+    ctx.fillStyle="#3a2050"; ctx.fillRect(cx+2, baseY-72, 16, 16); ctx.fillRect(cx+52, baseY-72, 16, 16);
+    ctx.fillStyle="#c090e8"; ctx.fillRect(cx+4, baseY-70, 12, 12); ctx.fillRect(cx+54, baseY-70, 12, 12);
+    ctx.fillStyle="rgba(200,160,255,0.4)"; ctx.fillRect(cx+4, baseY-70, 12, 4); ctx.fillRect(cx+54, baseY-70, 12, 4);
   }
 
   function drawHUD(){
-    // 半透明頂列
-    ctx.fillStyle="rgba(20,12,32,.55)"; ctx.fillRect(0,0,GAME_W,30);
-    ctx.fillStyle="#fff"; ctx.font="bold 16px 'Courier New',monospace"; ctx.textAlign="left";
-    ctx.fillText("分數 "+String(score).padStart(6,"0"), 12, 21);
-    // 金幣
-    ctx.fillStyle="#ffcc33"; ctx.beginPath(); ctx.arc(196,15,7,0,7); ctx.fill();
-    ctx.fillStyle="#fff"; ctx.fillText("× "+String(coins).padStart(2,"0"), 208, 21);
-    // 生命
-    ctx.fillStyle="#ff5a3c"; ctx.fillText("♥ × "+lives, 300, 21);
+    // 頂列底色（漸層）
+    const hudGrad = ctx.createLinearGradient(0,0,0,34);
+    hudGrad.addColorStop(0,"rgba(10,6,26,0.75)");
+    hudGrad.addColorStop(1,"rgba(10,6,26,0.0)");
+    ctx.fillStyle=hudGrad; ctx.fillRect(0,0,GAME_W,34);
+    // 底部細線
+    ctx.fillStyle="rgba(157,107,255,0.25)"; ctx.fillRect(0,30,GAME_W,1);
+
+    ctx.font="bold 14px 'Courier New',monospace"; ctx.textAlign="left";
+
+    // 分數（有陰影）
+    ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillText("★ "+String(score).padStart(6,"0"), 13, 22);
+    ctx.fillStyle="#ffe55a"; ctx.fillText("★ "+String(score).padStart(6,"0"), 12, 21);
+
+    // 金幣圖示
+    ctx.fillStyle="#ffcc33";
+    ctx.beginPath(); ctx.arc(172,15,6,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle="#ffe880"; ctx.beginPath(); ctx.arc(170,13,2,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillText("×"+String(coins).padStart(2,"0"), 182, 22);
+    ctx.fillStyle="#fff"; ctx.fillText("×"+String(coins).padStart(2,"0"), 181, 21);
+
+    // 生命（愛心）
+    ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillText("♥×"+lives, 230, 22);
+    ctx.fillStyle="#ff6a4a"; ctx.fillText("♥×"+lives, 229, 21);
+
     // 能力狀態
-    let ab = player ? (player.invincible>0?"無敵":(player.ability==="fire"?"火焰":(player.ability==="fly"?"羽毛":(player.power>0?"大":"小")))) : "小";
-    ctx.fillStyle="#9d6bff"; ctx.fillText("能力 "+ab, 400, 21);
-    // 關卡
-    ctx.fillStyle="#fff"; ctx.textAlign="center";
-    ctx.fillText("關卡 "+(levelIndex+1)+"  "+level.def.name, GAME_W/2+90, 21);
-    // 時間
+    let ab = player ? (player.invincible>0?"⚡無敵":(player.ability==="fire"?"🔥火焰":(player.ability==="fly"?"🪶羽毛":(player.power>0?"大":"小")))) : "小";
+    const abColor = player?.invincible>0?"#ffd23f": player?.ability==="fire"?"#ff7a30": player?.ability==="fly"?"#7af0c0":"#bbb";
+    ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillText(ab, 290, 22);
+    ctx.fillStyle=abColor; ctx.fillText(ab, 289, 21);
+
+    // 關卡名
+    ctx.fillStyle="rgba(0,0,0,0.45)"; ctx.textAlign="center";
+    ctx.fillText("第"+(levelIndex+1)+"關  "+level.def.name, GAME_W/2+60, 22);
+    ctx.fillStyle="rgba(200,185,255,0.9)";
+    ctx.fillText("第"+(levelIndex+1)+"關  "+level.def.name, GAME_W/2+60, 21);
+
+    // 時間（倒計時）
+    const timeStr = String(Math.ceil(timeLeft)).padStart(3," ");
+    const timeColor = timeLeft<30 ? (Math.sin(performance.now()/150)>0?"#ff3a1a":"#ff7a5a") : "#fff";
     ctx.textAlign="right";
-    ctx.fillStyle = timeLeft<30 ? "#ff5a3c" : "#fff";
-    ctx.fillText("時間 "+Math.ceil(timeLeft), GAME_W-12, 21);
+    ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillText("⏱"+timeStr, GAME_W-11, 22);
+    ctx.fillStyle=timeColor; ctx.fillText("⏱"+timeStr, GAME_W-12, 21);
     ctx.textAlign="left";
   }
 
   function render(){
+    ctx.save();
+    if(shakeAmp>0) ctx.translate((Math.random()-0.5)*shakeAmp*2|0, (Math.random()-0.5)*shakeAmp*2|0);
     if(state==="title"){
-      // 標題畫面背景動畫（簡單捲動天空）
-      ctx.fillStyle="#5c94fc"; ctx.fillRect(0,0,GAME_W,GAME_H);
-      ctx.fillStyle="rgba(255,255,255,.6)";
-      for(let i=0;i<8;i++){ let cx=((i*150 - performance.now()*0.02)%(GAME_W+150)); if(cx<-150)cx+=GAME_W+150; ctx.beginPath(); ctx.arc(cx,80+(i%3)*60,20,0,7); ctx.arc(cx+24,86+(i%3)*60,24,0,7); ctx.fill(); }
-      ctx.fillStyle="#5a8a3a"; ctx.fillRect(0,GAME_H-60,GAME_W,60);
-      return;
+      // 標題畫面動態背景
+      const tg = ctx.createLinearGradient(0,0,0,GAME_H);
+      tg.addColorStop(0,"#2a1a6e"); tg.addColorStop(0.5,"#5c94fc"); tg.addColorStop(1,"#7fd0a0");
+      ctx.fillStyle=tg; ctx.fillRect(0,0,GAME_W,GAME_H);
+      // 星星
+      ctx.fillStyle="rgba(255,255,255,0.85)";
+      for(let i=0;i<25;i++){
+        const bx=(i*89+11)%GAME_W, by=(i*47+5)%200;
+        const tw=0.4+Math.abs(Math.sin(performance.now()/700+i))*0.6;
+        ctx.globalAlpha=tw; ctx.fillRect(bx,by,i%4===0?2:1,i%4===0?2:1);
+      }
+      ctx.globalAlpha=1;
+      // 遠山
+      ctx.fillStyle="rgba(40,80,55,0.55)";
+      for(let i=0;i<7;i++){
+        let hx=((i*200-performance.now()*0.006)%(GAME_W+240)); if(hx<-240)hx+=GAME_W+240;
+        const hh=70+(i%3)*25;
+        ctx.beginPath(); ctx.moveTo(hx-40,GAME_H);
+        ctx.quadraticCurveTo(hx+50,GAME_H-hh,hx+120,GAME_H-hh*0.4);
+        ctx.quadraticCurveTo(hx+185,GAME_H-12,hx+230,GAME_H);
+        ctx.closePath(); ctx.fill();
+      }
+      // 雲
+      ctx.fillStyle="rgba(255,255,255,0.72)";
+      for(let i=0;i<6;i++){
+        let cx=((i*180-performance.now()*0.016)%(GAME_W+200)); if(cx<-200)cx+=GAME_W+200;
+        const cy=60+(i%3)*40, r=16;
+        ctx.beginPath(); ctx.arc(cx,cy,r,0,7); ctx.arc(cx+r*1.4,cy+r*0.1,r*1.2,0,7); ctx.arc(cx+r*2.8,cy,r,0,7); ctx.fill();
+      }
+      // 地面
+      ctx.fillStyle="#3a7a28"; ctx.fillRect(0,GAME_H-55,GAME_W,55);
+      ctx.fillStyle="#4aaa38"; ctx.fillRect(0,GAME_H-55,GAME_W,6);
+      // 暈映
+      const tvg=ctx.createRadialGradient(GAME_W/2,GAME_H/2,GAME_H*0.28,GAME_W/2,GAME_H/2,GAME_H*0.82);
+      tvg.addColorStop(0,"transparent"); tvg.addColorStop(1,"rgba(0,0,0,0.35)");
+      ctx.fillStyle=tvg; ctx.fillRect(0,0,GAME_W,GAME_H);
+      ctx.restore(); return;
     }
     if(!level) return;
 
@@ -1344,7 +1590,7 @@ const Game = (() => {
     for(let ty=0;ty<level.rows;ty++){
       for(let tx=startCol;tx<=endCol;tx++){
         const c = level.grid[ty][tx];
-        if(c!==" ") drawTile(c, tx*TILE - cam.x|0, ty*TILE);
+        if(c!==" ") drawTile(c, tx*TILE - cam.x|0, ty*TILE, tx, ty);
       }
     }
     drawCastle();
@@ -1372,6 +1618,11 @@ const Game = (() => {
     if(state==="dead"){
       ctx.fillStyle="rgba(0,0,0,.3)"; ctx.fillRect(0,0,GAME_W,GAME_H);
     }
+    // 暈映效果（邊緣暗角）
+    const vig=ctx.createRadialGradient(GAME_W/2,GAME_H/2,GAME_H*0.28, GAME_W/2,GAME_H/2,GAME_H*0.82);
+    vig.addColorStop(0,"transparent"); vig.addColorStop(1,"rgba(0,0,0,0.28)");
+    ctx.fillStyle=vig; ctx.fillRect(0,0,GAME_W,GAME_H);
+    ctx.restore(); // end shake transform
   }
 
   // ----- 主迴圈（requestAnimationFrame + 固定步長 deltaTime 補償）-----
@@ -1405,7 +1656,7 @@ const Game = (() => {
   // 對外暴露：包含實體陣列供各類別存取
   const api = {
     start, restart, nextLevel,
-    addScore, collectCoin, reachGoal, onPlayerDead,
+    addScore, collectCoin, reachGoal, onPlayerDead, addShake,
     get level(){return level;}, get player(){return player;},
     get enemies(){return enemies;}, get items(){return items;},
     get fireballs(){return fireballs;}, get shots(){return shots;},
