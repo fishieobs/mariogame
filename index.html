@@ -18,7 +18,7 @@
     --panel2:#3a2466;
     --glow:#9d6bff;
   }
-  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
   html,body{
     margin:0; padding:0; height:100%; width:100%;
     background:#0a0612;
@@ -438,9 +438,18 @@ const Input = {
     el.addEventListener("pointercancel", up);
     el.addEventListener("pointerleave", up);
   });
-  // 防止整頁滑動 / 雙擊縮放
+  // 防止整頁滑動 / 縮放
   document.addEventListener("touchmove", e=>{ e.preventDefault(); }, {passive:false});
-  document.addEventListener("gesturestart", e=>e.preventDefault());
+  document.addEventListener("gesturestart",  e=>e.preventDefault(), {passive:false});
+  document.addEventListener("gesturechange", e=>e.preventDefault(), {passive:false});
+  document.addEventListener("gestureend",    e=>e.preventDefault(), {passive:false});
+  // 防止雙擊縮放（iOS 10+ 忽略 user-scalable=no 時的備援）
+  let _lastTap=0;
+  document.addEventListener("touchend", e=>{
+    const now=Date.now();
+    if(now-_lastTap<300){ e.preventDefault(); }
+    _lastTap=now;
+  }, {passive:false});
 })();
 
 /* ===================== 5. Level（關卡解析） ===================== */
